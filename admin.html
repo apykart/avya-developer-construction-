@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AVYA Admin | Command Center</title>
+    <meta name="robots" content="noindex, nofollow" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+    <link rel="stylesheet" href="styles.css" />
+
+    <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="firebase-config.js"></script>
+    <script src="cloudinary-config.js"></script>
+    <script src="db.js"></script>
+</head>
+<body>
+
+    <!-- LOGIN SCREEN -->
+    <div class="login-screen" id="loginScreen">
+        <div class="login-box">
+            <h2>AVYA<span style="color:var(--red);">.</span> ADMIN</h2>
+            <div class="sub">Command Center — sign in to continue.</div>
+            <form id="loginForm" novalidate>
+                <div class="form-group"><label>Email</label><input type="email" id="loginEmail" placeholder="admin@yourcompany.com" required /></div>
+                <div class="form-group"><label>Password</label><input type="password" id="loginPassword" placeholder="••••••••" required /></div>
+                <div id="loginError" style="color:var(--red);font-size:0.8rem;margin-bottom:12px;display:none;"></div>
+                <button type="submit" class="btn btn-primary w-full" style="justify-content:center;" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
+            </form>
+            <p style="font-size:0.75rem;color:var(--muted);margin-top:16px;">First time? Create the admin account once in Firebase Console → Authentication → Add user, then add a document at Firestore → <code>users/&lt;that uid&gt;</code> with field <code>role: "admin"</code>.</p>
+        </div>
+    </div>
+
+    <!-- DASHBOARD -->
+    <div class="dashboard-shell" id="dashboardShell" style="display:none;">
+        <aside class="dash-sidebar">
+            <div class="brand"><h3>AVYA<span class="red">.</span></h3><small>COMMAND CENTER</small></div>
+            <div id="dashNavItems"></div>
+            <div class="spacer"></div>
+            <button class="logout-btn" onclick="logout()"><i class="fas fa-sign-out-alt"></i> Logout</button>
+        </aside>
+        <main class="dash-main">
+            <div class="header"><h2 id="dashTitle">Dashboard</h2><span class="badge-live"><i class="fas fa-circle" style="font-size:6px;"></i> LIVE</span></div>
+            <div id="dashContent"></div>
+        </main>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        // ============================================================
+        // STATE
+        // ============================================================
+        let currentView = 'dashboard';
+        let charts = {};
+        let cachedManagers = [];
+        let cachedProjects = [];
+
+        function showToast(message, type = 'info', duration = 4000) {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + type;
+            const icons = { success: 'fa-check-circle', error: 'fa-exclamation-circle', info: 'fa-info-circle' };
+            toast.innerHTML = `<i class="fas ${icons[type] || icons.info}"></i> ${message}`;
+            container.appendChild(toast);
+            setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, duration);
+        }
+        function fmtDate(ts) { if (!ts) return '—'; if (ts.seconds) return new Date(ts.seconds * 1000).toLocaleDateString(); return ts; }
+        function badgeClass(status) { return 'badge-' + String(status || '').replace(/\s+/g, '-').toLowerCase(); }
+
+        // ============================================================
+        // AUTH
+        // ============================================================
+        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const errBox = document.getElementById('loginError');
+            errBox.style.display = 'none';
+            btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Signing in…';
+            try {
+                const email = document.getElementById('loginEmail').value.trim();
+                const pass = document.getElementById('loginPassword').value;
+                const cred = await auth.signInWithEmailAndPassword(email, pass);
+                const roleDoc = await DB.getUserRole(cred.user.uid);
+                if (!roleDoc || roleDoc.role !== 'admin') {
+                    await auth.signOut();
+                    errBox.textContent = 'This login is not registered as an Admin.';
+                    errBox.style.display = 'block';
+                }
+                // onAuthStateChanged below handles showing the dashboard
+            } catch (err) {
+                errBox.textContent = err.message.replace('Firebase: ', '');
+                errBox.style.display = 'block';
+            } finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Login'; }
+        });
+
+        auth.onAuthStateChanged(async (user) => {
+            if (!user) { document.getElementById('loginScreen').style.display = 'flex'; document.getElementById('dashboardShell').style.display = 'none'; return; }
+            const roleDoc = await DB.getUserRole(user.uid);
+            if (!roleDoc || roleDoc.role !== 'admin') { document.getElementById('loginScreen').style.display = 'flex'; document.getElementById('dashboardShell').style.display = 'none'; return; }
+            document.getElementById('loginScreen').style.display = 'none';
+            document.getElementById('dashboardShell').style.display = 'flex';
+            renderNav();
+            navigateTo('dashboard');
+        });
+
+        function logout() {
+            if (!confirm('Logout from Admin?')) return;
+            auth.signOut();
+        }
+
+        // ============================================================
+        // NAV
+        // ============================================================
+        function renderNav() {
+            const items = [
+                { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-pie' },
+                { id: 'enquiries', label: 'Enquiries', icon: 'fa-inbox' },
+                { id: 'leads', label: 'Leads', icon: 'fa-user-plus' },
+                { id: 'customers', label: 'Customers', icon: 'fa-user-check' },
+                { id: 'projects', label: 'Projects', icon: 'fa-building' },
+                { id: 'gallery', label: 'Gallery', icon: 'fa-images' },
+                { id: 'testimonials', label: 'Testimonials', icon: 'fa-quote-right' },
+                { id: 'managers', label: 'Associates', icon: 'fa-users' },
+                { id: 'sitevisits', label: 'Site Visits', icon: 'fa-calendar-check' },
+                { id: 'followups', label: 'Follow-Ups', icon: 'fa-bell' },
+                { id: 'reports', label: 'Reports', icon: 'fa-chart-bar' },
+                { id: 'settings', label: 'Settings', icon: 'fa-cog' }
+            ];
+            document.getElementById('dashNavItems').innerHTML = items.map(i => `
+                <div class="nav-item ${currentView===i.id?'active':''}" data-view="${i.id}"><i class="fas ${i.icon}"></i><span>${i.label}</span></div>`).join('');
+            document.querySelectorAll('#dashNavItems .nav-item').forEach(el => el.addEventListener('click', () => navigateTo(el.dataset.view)));
+        }
+        function navigateTo(view) {
+            currentView = view;
+            document.querySelectorAll('#dashNavItems .nav-item').forEach(el => el.classList.toggle('active', el.dataset.view === view));
+            document.getElementById('dashTitle').textContent = view.charAt(0).toUpperCase() + view.slice(1);
+            renderView(view);
+        }
+        function renderView(view) {
+            const c = document.getElementById('dashContent');
+            c.innerHTML = '<p style="color:var(--muted);padding:20px 0;"><span class="spinner dark"></span> Loading…</p>';
+            const map = { dashboard: renderDashboard, enquiries: renderEnquiriesView, leads: renderLeadsView, customers: renderCustomersView,
+                projects: renderProjectsView, gallery: renderGalleryView, testimonials: renderTestimonialsView, managers: renderManagersView,
+                sitevisits: renderSiteVisitsView, followups: renderFollowUpsView, reports: renderReportsView, settings: renderSettingsView };
+            (map[view] || (() => { c.innerHTML = '<p>View not found.</p>'; }))(c);
+        }
+
+        // ============================================================
+        // DASHBOARD
+        // ============================================================
+        async function renderDashboard(c) {
+            const [leads, visits, customers, followups, managers, enquiries] = await Promise.all([
+                DB.getLeads(), DB.getSiteVisits(), DB.getCustomers(), DB.getFollowUps(), DB.getManagers(), DB.getEnquiries()
+            ]);
+            cachedManagers = managers;
+            const newLeads = leads.filter(l => l.status === 'new').length;
+            const activeManagers = managers.filter(m => m.status === 'active').length;
+            const pendingFollowups = followups.filter(f => f.status === 'pending').length;
+
+            c.innerHTML = `
+                <div class="dash-stats">
+                    <div class="dash-stat"><div class="num">${enquiries.length}</div><div class="label">Enquiries</div></div>
+                    <div class="dash-stat"><div class="num">${leads.length}</div><div class="label">Total Leads</div></div>
+                    <div class="dash-stat"><div class="num">${newLeads}</div><div class="label">New Leads</div></div>
+                    <div class="dash-stat"><div class="num">${visits.length}</div><div class="label">Site Visits</div></div>
+                    <div class="dash-stat"><div class="num">${customers.length}</div><div class="label">Customers</div></div>
+                    <div class="dash-stat"><div class="num">${activeManagers}</div><div class="label">Active Associates</div></div>
+                    <div class="dash-stat"><div class="num">${pendingFollowups}</div><div class="label">Pending Follow-ups</div></div>
+                </div>
+                <div class="dash-charts" style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px;">
+                    <div class="dash-chart" style="background:var(--white);padding:20px;border-radius:var(--radius);border:1px solid rgba(0,0,0,0.03);"><h4 style="font-size:0.85rem;font-weight:700;margin-bottom:12px;">Leads by Status</h4><canvas id="chartStatus"></canvas></div>
+                    <div class="dash-chart" style="background:var(--white);padding:20px;border-radius:var(--radius);border:1px solid rgba(0,0,0,0.03);"><h4 style="font-size:0.85rem;font-weight:700;margin-bottom:12px;">Leads per Associate</h4><canvas id="chartManagers"></canvas></div>
+                </div>
+                <h4 style="margin:12px 0 8px;font-weight:700;">Recent Enquiries</h4>
+                <div class="dash-table-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Project</th><th>Date</th></tr></thead>
+                <tbody>${enquiries.slice(0,6).map(e => `<tr><td>${e.name}</td><td>${e.phone}</td><td>${e.project||'—'}</td><td>${fmtDate(e.createdAt)}</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px;">No enquiries yet.</td></tr>'}</tbody></table></div>
+            `;
+            setTimeout(() => {
+                const statuses = ['new','contacted','interested','site visit scheduled','visited','negotiation','booked','lost'];
+                const counts = statuses.map(s => leads.filter(l => l.status === s).length);
+                Object.values(charts).forEach(ch => ch && ch.destroy()); charts = {};
+                const ctx1 = document.getElementById('chartStatus');
+                if (ctx1) charts.status = new Chart(ctx1, { type: 'doughnut', data: { labels: statuses, datasets: [{ data: counts, backgroundColor: ['#3b82f6','#f59e0b','#10b981','#8b5cf6','#06b6d4','#f97316','#22c55e','#ef4444'] }] }, options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 9 } } } } } });
+                const ctx2 = document.getElementById('chartManagers');
+                if (ctx2) charts.managers = new Chart(ctx2, { type: 'bar', data: { labels: managers.map(m => m.fullName), datasets: [{ label: 'Leads', data: managers.map(m => leads.filter(l => l.managerId === m.id).length), backgroundColor: '#B5121B', borderRadius: 4 }] }, options: { plugins: { legend: { display: false } } } });
+            }, 50);
+        }
+
+        // ============================================================
+        // ENQUIRIES
+        // ============================================================
+        async function renderEnquiriesView(c) {
+            const enquiries = await DB.getEnquiries();
+            c.innerHTML = `
+                <div class="dash-table-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Project</th><th>Budget</th><th>Message</th><th>Received</th><th></th></tr></thead>
+                <tbody>${enquiries.map(e => `<tr><td><strong>${e.name}</strong></td><td>${e.phone}</td><td>${e.project||'—'}</td><td>${e.budget||'—'}</td><td style="max-width:200px;">${(e.message||'').slice(0,60)}</td><td>${fmtDate(e.createdAt)}</td>
+                <td><button class="btn btn-sm btn-primary" onclick='convertEnquiryToLead(${JSON.stringify(e).replace(/'/g,"&apos;")})'>→ Lead</button></td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No enquiries yet.</td></tr>'}</tbody></table></div>`;
+        }
+        async function convertEnquiryToLead(e) {
+            await DB.addLead({ name: e.name, phone: e.phone, email: e.email||'', project: e.project||'', propertyType: e.type||'', budget: e.budget||'', status: 'new', notes: e.message||'', followUp: '', managerId: '' });
+            showToast('Converted to lead!', 'success');
+            navigateTo('leads');
+        }
+
+        // ============================================================
+        // LEADS
+        // ============================================================
+        async function renderLeadsView(c) {
+            const [leads, managers] = await Promise.all([DB.getLeads(), DB.getManagers()]);
+            cachedManagers = managers;
+            window.__leads = leads;
+            c.innerHTML = `
+                <div class="dash-actions"><button class="btn btn-primary" onclick="showAddLead()"><i class="fas fa-plus"></i> Add Lead</button></div>
+                <div class="dash-search"><input type="text" id="leadSearch" placeholder="Search leads..." oninput="filterLeadsTable()" />
+                <select id="leadStatusFilter" onchange="filterLeadsTable()"><option value="all">All Status</option><option value="new">New</option><option value="contacted">Contacted</option><option value="interested">Interested</option><option value="site visit scheduled">Scheduled</option><option value="visited">Visited</option><option value="negotiation">Negotiation</option><option value="booked">Booked</option><option value="lost">Lost</option></select></div>
+                <div class="dash-table-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Project</th><th>Status</th><th>Associate</th><th>Follow-up</th><th>Actions</th></tr></thead><tbody id="leadsTbody"></tbody></table></div>`;
+            filterLeadsTable();
+        }
+        function filterLeadsTable() {
+            const leads = window.__leads || [];
+            const search = (document.getElementById('leadSearch')?.value || '').toLowerCase();
+            const status = document.getElementById('leadStatusFilter')?.value || 'all';
+            const filtered = leads.filter(l => (l.name.toLowerCase().includes(search) || l.phone.includes(search)) && (status === 'all' || l.status === status));
+            document.getElementById('leadsTbody').innerHTML = filtered.map(l => {
+                const mgr = cachedManagers.find(m => m.id === l.managerId);
+                return `<tr><td><strong>${l.name}</strong></td><td>${l.phone}</td><td>${l.project||'—'}</td><td><span class="badge ${badgeClass(l.status)}">${l.status}</span></td><td>${mgr?mgr.fullName:'—'}</td><td>${l.followUp||'—'}</td>
+                <td><button class="btn btn-sm btn-outline-dark" onclick="editLead('${l.id}')"><i class="fas fa-edit"></i></button> <button class="btn btn-sm btn-outline-dark" onclick="deleteLead('${l.id}')"><i class="fas fa-trash"></i></button></td></tr>`;
+            }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No leads found.</td></tr>';
+        }
+        function leadFormFields(l = {}) {
+            const mgrOptions = cachedManagers.map(m => `<option value="${m.id}" ${l.managerId===m.id?'selected':''}>${m.fullName}</option>`).join('');
+            const projOptions = cachedProjects.map(p => `<option value="${p.name}" ${l.project===p.name?'selected':''}>${p.name}</option>`).join('');
+            return `
+                <div class="form-group"><label>Name *</label><input type="text" id="lName" value="${l.name||''}" required /></div>
+                <div class="form-group"><label>Phone *</label><input type="tel" id="lPhone" value="${l.phone||''}" required /></div>
+                <div class="form-group"><label>Email</label><input type="email" id="lEmail" value="${l.email||''}" /></div>
+                <div class="form-group"><label>Project</label><select id="lProject"><option value="">Select</option>${projOptions}</select></div>
+                <div class="form-group"><label>Property Type</label><select id="lType"><option value="">Select</option><option value="residential" ${l.propertyType==='residential'?'selected':''}>Residential</option><option value="commercial" ${l.propertyType==='commercial'?'selected':''}>Commercial</option><option value="villa" ${l.propertyType==='villa'?'selected':''}>Villa</option><option value="farmhouse" ${l.propertyType==='farmhouse'?'selected':''}>Farm House</option></select></div>
+                <div class="form-group"><label>Budget</label><select id="lBudget"><option value="">Select</option><option value="10-25" ${l.budget==='10-25'?'selected':''}>₹10L–25L</option><option value="25-50" ${l.budget==='25-50'?'selected':''}>₹25L–50L</option><option value="50-100" ${l.budget==='50-100'?'selected':''}>₹50L–1Cr</option><option value="100+" ${l.budget==='100+'?'selected':''}>₹1Cr+</option></select></div>
+                <div class="form-group"><label>Assign Associate</label><select id="lManager"><option value="">Unassigned</option>${mgrOptions}</select></div>
+                <div class="form-group full"><label>Status</label><select id="lStatus"><option value="new" ${l.status==='new'?'selected':''}>New</option><option value="contacted" ${l.status==='contacted'?'selected':''}>Contacted</option><option value="interested" ${l.status==='interested'?'selected':''}>Interested</option><option value="site visit scheduled" ${l.status==='site visit scheduled'?'selected':''}>Site Visit Scheduled</option><option value="visited" ${l.status==='visited'?'selected':''}>Visited</option><option value="negotiation" ${l.status==='negotiation'?'selected':''}>Negotiation</option><option value="booked" ${l.status==='booked'?'selected':''}>Booked</option><option value="lost" ${l.status==='lost'?'selected':''}>Lost</option></select></div>
+                <div class="form-group full"><label>Next Follow-up</label><input type="date" id="lFollowUp" value="${l.followUp||''}" /></div>
+                <div class="form-group full"><label>Notes</label><textarea id="lNotes" rows="2">${l.notes||''}</textarea></div>`;
+        }
+        function showAddLead() {
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Add New Lead</h3><form id="leadForm" class="form-2col" style="max-width:700px;">${leadFormFields()}
+                <div class="form-group full" style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save Lead</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('leads')">Cancel</button></div></form>`;
+            document.getElementById('leadForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const phone = document.getElementById('lPhone').value.replace(/\D/g, '');
+                if (phone.length !== 10) { showToast('Enter a valid 10-digit phone number.', 'error'); return; }
+                await DB.addLead({ name: document.getElementById('lName').value.trim(), phone, email: document.getElementById('lEmail').value.trim(),
+                    project: document.getElementById('lProject').value, propertyType: document.getElementById('lType').value, budget: document.getElementById('lBudget').value,
+                    managerId: document.getElementById('lManager').value, status: document.getElementById('lStatus').value, followUp: document.getElementById('lFollowUp').value, notes: document.getElementById('lNotes').value.trim() });
+                showToast('Lead added!', 'success'); navigateTo('leads');
+            });
+        }
+        async function editLead(id) {
+            const l = (window.__leads || []).find(x => x.id === id);
+            if (!l) return;
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Edit Lead</h3><form id="leadForm" class="form-2col" style="max-width:700px;">${leadFormFields(l)}
+                <div class="form-group full" style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Update Lead</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('leads')">Cancel</button></div></form>`;
+            document.getElementById('leadForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const phone = document.getElementById('lPhone').value.replace(/\D/g, '');
+                if (phone.length !== 10) { showToast('Enter a valid 10-digit phone number.', 'error'); return; }
+                await DB.updateLead(id, { name: document.getElementById('lName').value.trim(), phone, email: document.getElementById('lEmail').value.trim(),
+                    project: document.getElementById('lProject').value, propertyType: document.getElementById('lType').value, budget: document.getElementById('lBudget').value,
+                    managerId: document.getElementById('lManager').value, status: document.getElementById('lStatus').value, followUp: document.getElementById('lFollowUp').value, notes: document.getElementById('lNotes').value.trim() });
+                showToast('Lead updated!', 'success'); navigateTo('leads');
+            });
+        }
+        async function deleteLead(id) { if (!confirm('Delete this lead?')) return; await DB.deleteLead(id); showToast('Lead deleted.', 'info'); navigateTo('leads'); }
+
+        // ============================================================
+        // CUSTOMERS
+        // ============================================================
+        async function renderCustomersView(c) {
+            const [customers, managers] = await Promise.all([DB.getCustomers(), DB.getManagers()]);
+            cachedManagers = managers;
+            c.innerHTML = `<div class="dash-table-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Project</th><th>Status</th><th>Associate</th></tr></thead>
+                <tbody>${customers.map(cu => { const mgr = managers.find(m => m.id === cu.managerId); return `<tr><td><strong>${cu.name}</strong></td><td>${cu.phone}</td><td>${cu.project||'—'}</td><td><span class="badge ${badgeClass(cu.status)}">${cu.status}</span></td><td>${mgr?mgr.fullName:'—'}</td></tr>`; }).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:30px;">No customers yet.</td></tr>'}</tbody></table></div>`;
+        }
+
+        // ============================================================
+        // PROJECTS (with Cloudinary image upload)
+        // ============================================================
+        async function renderProjectsView(c) {
+            const projects = await DB.getProjects();
+            cachedProjects = projects;
+            c.innerHTML = `<div class="dash-actions"><button class="btn btn-primary" onclick="showAddProject()"><i class="fas fa-plus"></i> Add Project</button></div>
+                <div class="dash-table-wrap"><table><thead><tr><th>Image</th><th>Name</th><th>Location</th><th>Category</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>${projects.map(p => `<tr><td><img src="${p.img}" style="width:56px;height:40px;object-fit:cover;border-radius:4px;" /></td><td><strong>${p.name}</strong></td><td>${p.location}</td><td>${p.category}</td><td><span class="badge ${badgeClass(p.status)}">${p.status}</span></td>
+                <td><button class="btn btn-sm btn-outline-dark" onclick="editProject('${p.id}')"><i class="fas fa-edit"></i></button> <button class="btn btn-sm btn-outline-dark" onclick="deleteProjectRow('${p.id}')"><i class="fas fa-trash"></i></button></td></tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px;">No projects yet.</td></tr>'}</tbody></table></div>`;
+        }
+        function projectFormFields(p = {}) {
+            return `
+                <div class="form-group full"><label>Project Image</label>
+                    <div class="upload-box" id="projImgBox" onclick="document.getElementById('projImgInput').click()">
+                        ${p.img ? `<img src="${p.img}" id="projImgPreview" />` : `<img src="" id="projImgPreview" style="display:none;" />`}
+                        <div id="projImgHint"><i class="fas fa-cloud-upload-alt"></i> Click to upload image</div>
+                    </div>
+                    <input type="file" id="projImgInput" accept="image/*" style="display:none;" />
+                    <input type="hidden" id="projImgUrl" value="${p.img||''}" />
+                </div>
+                <div class="form-group"><label>Name *</label><input type="text" id="pName" value="${p.name||''}" required /></div>
+                <div class="form-group"><label>Location *</label><input type="text" id="pLocation" value="${p.location||''}" required /></div>
+                <div class="form-group"><label>Category</label><select id="pCategory"><option value="residential" ${p.category==='residential'?'selected':''}>Residential</option><option value="commercial" ${p.category==='commercial'?'selected':''}>Commercial</option><option value="villa" ${p.category==='villa'?'selected':''}>Villa</option><option value="farmhouse" ${p.category==='farmhouse'?'selected':''}>Farm House</option></select></div>
+                <div class="form-group"><label>Status</label><select id="pStatus"><option value="ongoing" ${p.status==='ongoing'?'selected':''}>Ongoing</option><option value="upcoming" ${p.status==='upcoming'?'selected':''}>Upcoming</option><option value="completed" ${p.status==='completed'?'selected':''}>Completed</option></select></div>
+                <div class="form-group full"><label>Description</label><textarea id="pDesc" rows="3">${p.desc||''}</textarea></div>
+                <div class="form-group full"><label>Amenities (comma separated)</label><input type="text" id="pAmenities" value="${(p.amenities||[]).join(', ')}" /></div>`;
+        }
+        function wireProjectImageUpload() {
+            document.getElementById('projImgInput').addEventListener('change', async function() {
+                const file = this.files[0]; if (!file) return;
+                const hint = document.getElementById('projImgHint');
+                hint.innerHTML = '<span class="spinner dark"></span> Uploading…';
+                try {
+                    const url = await uploadToCloudinary(file, (pct) => { hint.innerHTML = `<span class="spinner dark"></span> Uploading ${pct}%…`; });
+                    document.getElementById('projImgUrl').value = url;
+                    const preview = document.getElementById('projImgPreview');
+                    preview.src = url; preview.style.display = 'block';
+                    hint.innerHTML = '<i class="fas fa-check-circle" style="color:#22c55e;"></i> Uploaded — click to replace';
+                } catch (err) { showToast(err.message, 'error'); hint.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Click to upload image'; }
+            });
+        }
+        function showAddProject() {
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Add New Project</h3><form id="projectForm" class="form-2col" style="max-width:700px;">${projectFormFields()}
+                <div class="form-group full" style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save Project</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('projects')">Cancel</button></div></form>`;
+            wireProjectImageUpload();
+            document.getElementById('projectForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const img = document.getElementById('projImgUrl').value || 'https://images.unsplash.com/photo-1564013799919-ab600027ffc6?w=800&q=80';
+                await DB.addProject({ name: document.getElementById('pName').value.trim(), location: document.getElementById('pLocation').value.trim(),
+                    category: document.getElementById('pCategory').value, status: document.getElementById('pStatus').value, desc: document.getElementById('pDesc').value.trim(),
+                    img, amenities: document.getElementById('pAmenities').value.split(',').map(s => s.trim()).filter(Boolean) });
+                showToast('Project added!', 'success'); navigateTo('projects');
+            });
+        }
+        async function editProject(id) {
+            const p = cachedProjects.find(x => x.id === id) || await DB.getProject(id);
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Edit Project</h3><form id="projectForm" class="form-2col" style="max-width:700px;">${projectFormFields(p)}
+                <div class="form-group full" style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Update Project</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('projects')">Cancel</button></div></form>`;
+            wireProjectImageUpload();
+            document.getElementById('projectForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                await DB.updateProject(id, { name: document.getElementById('pName').value.trim(), location: document.getElementById('pLocation').value.trim(),
+                    category: document.getElementById('pCategory').value, status: document.getElementById('pStatus').value, desc: document.getElementById('pDesc').value.trim(),
+                    img: document.getElementById('projImgUrl').value || p.img, amenities: document.getElementById('pAmenities').value.split(',').map(s => s.trim()).filter(Boolean) });
+                showToast('Project updated!', 'success'); navigateTo('projects');
+            });
+        }
+        async function deleteProjectRow(id) { if (!confirm('Delete this project?')) return; await DB.deleteProject(id); showToast('Project deleted.', 'info'); navigateTo('projects'); }
+
+        // ============================================================
+        // GALLERY
+        // ============================================================
+        async function renderGalleryView(c) {
+            const gallery = await DB.getGallery();
+            c.innerHTML = `
+                <div class="upload-box" id="galUploadBox" style="max-width:320px;margin-bottom:24px;" onclick="document.getElementById('galInput').click()">
+                    <div id="galHint"><i class="fas fa-cloud-upload-alt"></i> Click to upload gallery image</div>
+                </div>
+                <input type="file" id="galInput" accept="image/*" style="display:none;" />
+                <div class="gallery-grid" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr));">
+                    ${gallery.map(g => `<div class="item" style="aspect-ratio:1/1;position:relative;"><img src="${g.url}" style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius);" />
+                    <button onclick="deleteGalleryImg('${g.id}')" style="position:absolute;top:6px;right:6px;background:var(--red);color:#fff;width:26px;height:26px;border-radius:50%;font-size:0.75rem;"><i class="fas fa-trash"></i></button></div>`).join('') || '<p style="color:var(--muted);">No gallery images yet.</p>'}
+                </div>`;
+            document.getElementById('galInput').addEventListener('change', async function() {
+                const file = this.files[0]; if (!file) return;
+                const hint = document.getElementById('galHint');
+                hint.innerHTML = '<span class="spinner dark"></span> Uploading…';
+                try {
+                    const url = await uploadToCloudinary(file, (pct) => { hint.innerHTML = `<span class="spinner dark"></span> ${pct}%…`; });
+                    await DB.addGalleryImage(url);
+                    showToast('Image added to gallery!', 'success');
+                    navigateTo('gallery');
+                } catch (err) { showToast(err.message, 'error'); hint.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Click to upload gallery image'; }
+            });
+        }
+        async function deleteGalleryImg(id) { if (!confirm('Remove this image?')) return; await DB.deleteGalleryImage(id); showToast('Removed.', 'info'); navigateTo('gallery'); }
+
+        // ============================================================
+        // TESTIMONIALS
+        // ============================================================
+        async function renderTestimonialsView(c) {
+            const testimonials = await DB.getTestimonials();
+            c.innerHTML = `
+                <div class="dash-actions"><button class="btn btn-primary" onclick="showAddTestimonial()"><i class="fas fa-plus"></i> Add Testimonial</button></div>
+                <div class="dash-table-wrap"><table><thead><tr><th>Name</th><th>Location</th><th>Text</th><th></th></tr></thead>
+                <tbody>${testimonials.map(t => `<tr><td><strong>${t.name}</strong></td><td>${t.location||'—'}</td><td style="max-width:320px;">${t.text}</td><td><button class="btn btn-sm btn-outline-dark" onclick="deleteTestimonialRow('${t.id}')"><i class="fas fa-trash"></i></button></td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px;">No testimonials yet. Only add real, consented customer testimonials — never fabricate these.</td></tr>'}</tbody></table></div>`;
+        }
+        function showAddTestimonial() {
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Add Testimonial</h3><p style="color:var(--muted);font-size:0.85rem;margin-bottom:12px;">Only add real testimonials from actual customers, with their permission.</p>
+                <form id="testForm" style="max-width:600px;"><div class="form-group"><label>Customer Name *</label><input type="text" id="tName" required /></div>
+                <div class="form-group"><label>Location</label><input type="text" id="tLocation" /></div>
+                <div class="form-group"><label>Testimonial Text *</label><textarea id="tText" rows="3" required></textarea></div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('testimonials')">Cancel</button></div></form>`;
+            document.getElementById('testForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                await DB.addTestimonial({ name: document.getElementById('tName').value.trim(), location: document.getElementById('tLocation').value.trim(), text: document.getElementById('tText').value.trim() });
+                showToast('Testimonial added!', 'success'); navigateTo('testimonials');
+            });
+        }
+        async function deleteTestimonialRow(id) { if (!confirm('Delete this testimonial?')) return; await DB.deleteTestimonial(id); showToast('Deleted.', 'info'); navigateTo('testimonials'); }
+
+        // ============================================================
+        // MANAGERS / ASSOCIATES  (creates a real Firebase Auth login)
+        // ============================================================
+        async function renderManagersView(c) {
+            const managers = await DB.getManagers();
+            cachedManagers = managers;
+            c.innerHTML = `<div class="dash-actions"><button class="btn btn-primary" onclick="showAddManager()"><i class="fas fa-plus"></i> Add Associate</button></div>
+                <div class="dash-table-wrap"><table><thead><tr><th>Name</th><th>Mobile</th><th>Email (login)</th><th>Area</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>${managers.map(m => `<tr><td><strong>${m.fullName}</strong></td><td>${m.mobile}</td><td>${m.email}</td><td>${m.area||'—'}</td><td><span class="badge ${m.status==='active'?'badge-active':'badge-inactive'}">${m.status}</span></td>
+                <td><button class="btn btn-sm btn-outline-dark" onclick="editManagerRow('${m.id}')"><i class="fas fa-edit"></i></button> <button class="btn btn-sm ${m.status==='active'?'btn-outline-dark':'btn-primary'}" onclick="toggleManager('${m.id}','${m.status}')">${m.status==='active'?'<i class="fas fa-pause"></i>':'<i class="fas fa-play"></i>'}</button></td></tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px;">No associates yet.</td></tr>'}</tbody></table></div>`;
+        }
+        function showAddManager() {
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Add New Associate</h3>
+                <p style="color:var(--muted);font-size:0.85rem;margin-bottom:12px;">This creates a real login for associate.html. Share the email + password with them directly.</p>
+                <form id="managerForm" class="form-2col" style="max-width:700px;">
+                <div class="form-group"><label>Full Name *</label><input type="text" id="mFullName" required /></div>
+                <div class="form-group"><label>Mobile *</label><input type="tel" id="mMobile" required /></div>
+                <div class="form-group"><label>Login Email *</label><input type="email" id="mEmail" required /></div>
+                <div class="form-group"><label>Temporary Password * (min 6 chars)</label><input type="text" id="mPassword" required minlength="6" /></div>
+                <div class="form-group"><label>Designation</label><input type="text" id="mDesignation" placeholder="Sales Associate" /></div>
+                <div class="form-group"><label>Assigned Area</label><input type="text" id="mArea" /></div>
+                <div class="form-group full"><label>Address</label><input type="text" id="mAddress" /></div>
+                <div class="form-group full" style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary" id="mSubmitBtn"><i class="fas fa-save"></i> Create Login &amp; Save</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('managers')">Cancel</button></div>
+                </form>`;
+            document.getElementById('managerForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const btn = document.getElementById('mSubmitBtn');
+                btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Creating…';
+                try {
+                    await DB.addManagerWithLogin({
+                        email: document.getElementById('mEmail').value.trim(), password: document.getElementById('mPassword').value,
+                        fullName: document.getElementById('mFullName').value.trim(), mobile: document.getElementById('mMobile').value.trim(),
+                        designation: document.getElementById('mDesignation').value.trim(), area: document.getElementById('mArea').value.trim(),
+                        address: document.getElementById('mAddress').value.trim()
+                    });
+                    showToast('Associate login created!', 'success'); navigateTo('managers');
+                } catch (err) { showToast(err.message.replace('Firebase: ', ''), 'error'); btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Create Login &amp; Save'; }
+            });
+        }
+        async function editManagerRow(id) {
+            const m = cachedManagers.find(x => x.id === id);
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Edit Associate</h3><form id="managerForm" class="form-2col" style="max-width:700px;">
+                <div class="form-group"><label>Full Name *</label><input type="text" id="mFullName" value="${m.fullName}" required /></div>
+                <div class="form-group"><label>Mobile *</label><input type="tel" id="mMobile" value="${m.mobile}" required /></div>
+                <div class="form-group"><label>Designation</label><input type="text" id="mDesignation" value="${m.designation||''}" /></div>
+                <div class="form-group"><label>Assigned Area</label><input type="text" id="mArea" value="${m.area||''}" /></div>
+                <div class="form-group full"><label>Address</label><input type="text" id="mAddress" value="${m.address||''}" /></div>
+                <div class="form-group full" style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Update</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('managers')">Cancel</button></div></form>`;
+            document.getElementById('managerForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                await DB.updateManager(id, { fullName: document.getElementById('mFullName').value.trim(), mobile: document.getElementById('mMobile').value.trim(),
+                    designation: document.getElementById('mDesignation').value.trim(), area: document.getElementById('mArea').value.trim(), address: document.getElementById('mAddress').value.trim() });
+                showToast('Updated!', 'success'); navigateTo('managers');
+            });
+        }
+        async function toggleManager(id, status) { await DB.toggleManagerStatus(id, status === 'active' ? 'inactive' : 'active'); showToast('Status updated.', 'success'); navigateTo('managers'); }
+
+        // ============================================================
+        // SITE VISITS
+        // ============================================================
+        async function renderSiteVisitsView(c) {
+            const [visits, managers] = await Promise.all([DB.getSiteVisits(), DB.getManagers()]);
+            cachedManagers = managers;
+            c.innerHTML = `<div class="dash-table-wrap"><table><thead><tr><th>Customer</th><th>Project</th><th>Date</th><th>Time</th><th>Associate</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>${visits.map(v => { const mgr = managers.find(m => m.id === v.managerId); return `<tr><td><strong>${v.customer}</strong></td><td>${v.project||'—'}</td><td>${v.date}</td><td>${v.time||'—'}</td>
+                    <td><select onchange="assignVisitManager('${v.id}', this.value)"><option value="">Unassigned</option>${managers.map(m => `<option value="${m.id}" ${v.managerId===m.id?'selected':''}>${m.fullName}</option>`).join('')}</select></td>
+                    <td><span class="badge ${badgeClass(v.status)}">${v.status}</span></td>
+                    <td><button class="btn btn-sm btn-outline-dark" onclick="updateVisit('${v.id}','completed')"><i class="fas fa-check"></i></button> <button class="btn btn-sm btn-outline-dark" onclick="updateVisit('${v.id}','cancelled')"><i class="fas fa-times"></i></button></td></tr>`; }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No site visits yet.</td></tr>'}</tbody></table></div>`;
+        }
+        async function assignVisitManager(id, managerId) { await DB.updateSiteVisit(id, { managerId }); showToast('Assigned.', 'success'); }
+        async function updateVisit(id, status) { await DB.updateSiteVisit(id, { status }); showToast(`Visit ${status}.`, 'success'); navigateTo('sitevisits'); }
+
+        // ============================================================
+        // FOLLOW-UPS
+        // ============================================================
+        async function renderFollowUpsView(c) {
+            const [followups, managers] = await Promise.all([DB.getFollowUps(), DB.getManagers()]);
+            cachedManagers = managers;
+            c.innerHTML = `<div class="dash-actions"><button class="btn btn-primary" onclick="showAddFollowUp()"><i class="fas fa-plus"></i> Add Follow-up</button></div>
+                <div class="dash-table-wrap"><table><thead><tr><th>Client</th><th>Project</th><th>Date</th><th>Purpose</th><th>Associate</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>${followups.map(f => { const mgr = managers.find(m => m.id === f.managerId); return `<tr><td><strong>${f.client}</strong></td><td>${f.project||'—'}</td><td>${f.date}</td><td>${f.purpose||'—'}</td><td>${mgr?mgr.fullName:'—'}</td>
+                <td><span class="badge ${f.status==='completed'?'badge-completed':'badge-pending'}">${f.status}</span></td>
+                <td><button class="btn btn-sm btn-outline-dark" onclick="completeFollowUp('${f.id}')"><i class="fas fa-check"></i></button> <button class="btn btn-sm btn-outline-dark" onclick="deleteFollowUpRow('${f.id}')"><i class="fas fa-trash"></i></button></td></tr>`; }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No follow-ups yet.</td></tr>'}</tbody></table></div>`;
+        }
+        function showAddFollowUp() {
+            const mgrOptions = cachedManagers.map(m => `<option value="${m.id}">${m.fullName}</option>`).join('');
+            document.getElementById('dashContent').innerHTML = `<h3 style="margin-bottom:16px;">Add Follow-up</h3><form id="fuForm" style="max-width:600px;">
+                <div class="form-group"><label>Client *</label><input type="text" id="fuClient" required /></div>
+                <div class="form-group"><label>Project</label><input type="text" id="fuProject" /></div>
+                <div class="form-row"><div class="form-group"><label>Date</label><input type="date" id="fuDate" /></div><div class="form-group"><label>Time</label><input type="time" id="fuTime" /></div></div>
+                <div class="form-group"><label>Purpose</label><input type="text" id="fuPurpose" /></div>
+                <div class="form-group"><label>Assign Associate</label><select id="fuManager"><option value="">Unassigned</option>${mgrOptions}</select></div>
+                <div class="form-group"><label>Notes</label><textarea id="fuNotes" rows="2"></textarea></div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;"><button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save</button><button type="button" class="btn btn-outline-dark" onclick="navigateTo('followups')">Cancel</button></div></form>`;
+            document.getElementById('fuForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                await DB.addFollowUp({ client: document.getElementById('fuClient').value.trim(), project: document.getElementById('fuProject').value.trim(),
+                    date: document.getElementById('fuDate').value || new Date().toISOString().slice(0,10), time: document.getElementById('fuTime').value,
+                    purpose: document.getElementById('fuPurpose').value.trim(), managerId: document.getElementById('fuManager').value, notes: document.getElementById('fuNotes').value.trim() });
+                showToast('Follow-up added!', 'success'); navigateTo('followups');
+            });
+        }
+        async function completeFollowUp(id) { await DB.updateFollowUp(id, { status: 'completed' }); showToast('Marked complete!', 'success'); navigateTo('followups'); }
+        async function deleteFollowUpRow(id) { if (!confirm('Delete this follow-up?')) return; await DB.deleteFollowUp(id); showToast('Deleted.', 'info'); navigateTo('followups'); }
+
+        // ============================================================
+        // REPORTS
+        // ============================================================
+        async function renderReportsView(c) {
+            const [leads, visits, customers] = await Promise.all([DB.getLeads(), DB.getSiteVisits(), DB.getCustomers()]);
+            c.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;">
+                <div class="dash-stat"><div class="num">${leads.length}</div><div class="label">Total Leads</div></div>
+                <div class="dash-stat"><div class="num">${leads.filter(l=>l.status==='booked').length}</div><div class="label">Booked</div></div>
+                <div class="dash-stat"><div class="num">${visits.filter(v=>v.status==='completed').length}</div><div class="label">Visits Completed</div></div>
+                <div class="dash-stat"><div class="num">${customers.length}</div><div class="label">Customers</div></div></div>
+                <div class="dash-actions"><button class="btn btn-outline-dark" onclick="exportLeadsCSV()"><i class="fas fa-file-csv"></i> Export Leads CSV</button></div>`;
+        }
+        async function exportLeadsCSV() {
+            const leads = await DB.getLeads();
+            if (!leads.length) { showToast('No data to export.', 'error'); return; }
+            const headers = ['Name','Phone','Email','Project','Status','Follow-up'];
+            const rows = leads.map(l => [l.name, l.phone, l.email||'', l.project||'', l.status, l.followUp||'']);
+            const csv = [headers.join(','), ...rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','))].join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = 'avya_leads_report.csv'; a.click();
+            URL.revokeObjectURL(url);
+            showToast('CSV exported!', 'success');
+        }
+
+        // ============================================================
+        // SETTINGS
+        // ============================================================
+        async function renderSettingsView(c) {
+            const s = (await DB.getSettings()) || {};
+            c.innerHTML = `<div style="max-width:600px;"><h3 style="margin-bottom:16px;">Company Settings</h3>
+                <form id="settingsForm">
+                <div class="form-group"><label>Company Name</label><input type="text" id="sName" value="${s.companyName||'AVYA DEVELOPER & CONSTRUCTION'}" /></div>
+                <div class="form-group"><label>Phone</label><input type="text" id="sPhone" value="${s.phone||'+91-7651970593'}" /></div>
+                <div class="form-group"><label>Email</label><input type="email" id="sEmail" value="${s.email||'avyahome103@gmail.com'}" /></div>
+                <div class="form-group"><label>Address</label><input type="text" id="sAddress" value="${s.address||''}" /></div>
+                <div class="form-row"><div class="form-group"><label>Years Experience</label><input type="text" id="sYears" value="${s.statYears||'10+'}" /></div><div class="form-group"><label>Happy Customers</label><input type="text" id="sCustomers" value="${s.statCustomers||'1250+'}" /></div></div>
+                <div class="form-row"><div class="form-group"><label>Properties Sold</label><input type="text" id="sSold" value="${s.statSold||'2500+'}" /></div><div class="form-group"><label>Projects</label><input type="text" id="sProjects" value="${s.statProjects||'3'}" /></div></div>
+                <div class="form-group"><label>Amenities (comma separated)</label><input type="text" id="sAmenities" value="${(s.amenities||['Gated Society','Wide Roads','Street Lights']).join(', ')}" /></div>
+                <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save Settings</button>
+                </form>
+                <div style="background:var(--light);padding:20px;border-radius:var(--radius);margin-top:24px;">
+                    <h4 style="font-weight:700;">First-time Setup</h4>
+                    <p style="color:var(--muted);font-size:0.9rem;margin-bottom:12px;">If projects/settings are empty on the live site, click below once to seed a starter project.</p>
+                    <button class="btn btn-outline-dark" onclick="runSeed()"><i class="fas fa-seedling"></i> Seed Starter Data</button>
+                </div></div>`;
+            document.getElementById('settingsForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                await DB.saveSettings({ companyName: document.getElementById('sName').value.trim(), phone: document.getElementById('sPhone').value.trim(),
+                    email: document.getElementById('sEmail').value.trim(), address: document.getElementById('sAddress').value.trim(),
+                    statYears: document.getElementById('sYears').value.trim(), statCustomers: document.getElementById('sCustomers').value.trim(),
+                    statSold: document.getElementById('sSold').value.trim(), statProjects: document.getElementById('sProjects').value.trim(),
+                    amenities: document.getElementById('sAmenities').value.split(',').map(s => s.trim()).filter(Boolean) });
+                showToast('Settings saved!', 'success');
+            });
+        }
+        async function runSeed() { const ok = await DB.seedIfEmpty(); showToast(ok ? 'Starter data seeded!' : 'Already seeded — settings already exist.', ok ? 'success' : 'info'); }
+    </script>
+</body>
+</html>
