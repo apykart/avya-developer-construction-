@@ -9,8 +9,8 @@
       - Preset name: avya_unsigned  (or change the name below to match)
       - Save
    ============================================================ */
-const CLOUDINARY_CLOUD_NAME = "PASTE_YOUR_CLOUD_NAME";
-const CLOUDINARY_UPLOAD_PRESET = "avya_unsigned";
+const CLOUDINARY_CLOUD_NAME = "xlgwrkhf";
+const CLOUDINARY_UPLOAD_PRESET = "avya_1"; // unsigned preset
 
 /**
  * Uploads a File object to Cloudinary and returns the secure HTTPS URL.
