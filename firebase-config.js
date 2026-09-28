@@ -9,12 +9,13 @@
       Firestore → Rules tab, then Publish
    ============================================================ */
 const firebaseConfig = {
-    apiKey: "PASTE_YOUR_API_KEY",
-    authDomain: "PASTE_YOUR_PROJECT.firebaseapp.com",
-    projectId: "PASTE_YOUR_PROJECT_ID",
-    storageBucket: "PASTE_YOUR_PROJECT.appspot.com",
-    messagingSenderId: "PASTE_YOUR_SENDER_ID",
-    appId: "PASTE_YOUR_APP_ID"
+    apiKey: "AIzaSyB57_Yzabh88H5GokibeBLhyQScOBIUIHY",
+    authDomain: "avya-developer.firebaseapp.com",
+    projectId: "avya-developer",
+    storageBucket: "avya-developer.firebasestorage.app",
+    messagingSenderId: "803397320568",
+    appId: "1:803397320568:web:95e8ef551427730fe3528d",
+    measurementId: "G-C2ZS1NSF4X"
 };
 
 // Primary app — used for the page's own logged-in session
