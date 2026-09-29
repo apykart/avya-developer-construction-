@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVYA Admin Panel</title>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<div id="login"><form class="box" id="lform">
+  <h2>AVYA Admin Login</h2>
+  <p id="lerr" style="color:#B5121B;margin-bottom:8px"></p>
+  <label>Email<input id="lemail" type="email" required></label>
+  <label>Password<input id="lpass" type="password" required></label>
+  <button class="btn" style="width:100%">Login</button>
+  <p style="margin-top:12px"><a href="index.html">Back to website</a></p>
+</form></div>
+<div id="app" class="hide"><nav id="nav"></nav><main id="main"></main></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script src="db.js"></script>
+<script src="portal.js"></script>
+<script>
+let MG = [];
+const mn = id => (MG.find(x => x.id == id) || {}).fullName || '—';
+const mo = () => [['', 'Unassigned'], ...MG.map(m => [m.id, m.fullName])];
+
+boot('admin', async () => {
+  MG = await DB.getManagers();
+  mkNav({ Dashboard: dash, Enquiries: enq, Leads: leads, 'Site Visits': visits, Associates: assoc, Projects: proj, Gallery: gal, Testimonials: tes, Settings: settings }, 'AVYA Admin');
+});
+
+/* ---------- Dashboard ---------- */
+function dash(m) {
+  const c = {};
+  const r = () => m.innerHTML = `<h3>Dashboard</h3><div class="cards">${Object.entries(c).map(([k, v]) => `<div class="card"><b>${v}</b>${k}</div>`).join('')}</div>`;
+  [['Enquiries', 'enquiries'], ['Leads', 'leads'], ['Site visits', 'siteVisits'], ['Associates', 'managers'], ['Projects', 'projects']]
+    .forEach(([l, col]) => sub(db.collection(col), a => { c[l] = a.length; r(); }));
+}
+
+/* ---------- Enquiries (website form) ---------- */
+function enq(m) {
+  window._lead = async id => {
+    const e = DATA.find(x => x.id == id);
+    try {
+      await db.collection('leads').add({ name: e.name, phone: e.phone, email: e.email || '', project: e.project || '', budget: e.budget || '', status: 'new', source: 'Website', notes: e.message || '', managerId: '', createdAt: TS() });
+      await db.collection('enquiries').doc(id).update({ status: 'converted' });
+      toast('Lead created. Assign it to an associate in Leads.');
+    } catch (x) { toast(x.message); }
+  };
+  crud(m, { col: 'enquiries', title: 'Enquiry', add: false, del: true,
+    cols: ['Name', 'Phone', 'Project', 'Budget', 'Message', 'Status'],
+    row: d => [esc(d.name), esc(d.phone), esc(d.project), esc(d.budget), esc((d.message || '').slice(0, 40)), bd(d.status)],
+    fields: [['status', 'Status', 'select', ['new', 'contacted', 'converted', 'closed']]],
+    extra: d => d.status === 'converted' ? '' : `<button class="btn s" onclick="_lead('${d.id}')">Make lead</button>` });
+}
+
+/* ---------- Leads (assign to associate here) ---------- */
+function leads(m) {
+  crud(m, { col: 'leads', title: 'Lead', req: 'name', del: true,
+    cols: ['Name', 'Phone', 'Project', 'Status', 'Associate'],
+    row: d => [esc(d.name), esc(d.phone), esc(d.project), bd(d.status), esc(mn(d.managerId))],
+    fields: [...LF, ['managerId', 'Assign to associate', 'select', mo()]] });
+}
+
+/* ---------- Site visits ---------- */
+function visits(m) {
+  crud(m, { col: 'siteVisits', title: 'Site visit', add: false, del: true,
+    cols: ['Name', 'Phone', 'Project', 'When', 'Associate', 'Status'],
+    row: d => [esc(d.name || d.customer), esc(d.phone), esc(d.project), esc((d.date || '') + ' ' + (d.time || '')), esc(mn(d.managerId)), bd(d.status)],
+    fields: [['managerId', 'Assign to associate', 'select', mo()], ['status', 'Status', 'select', ['scheduled', 'confirmed', 'completed', 'cancelled']], ['remarks', 'Remarks', 'area']] });
+}
+
+/* ---------- Associates ---------- */
+function assoc(m) {
+  const AF = [['fullName', 'Full name *'], ['email', 'Login email *', 'email'], ['password', 'Password (min 6) *'], ['mobile', 'Mobile', 'tel'], ['empId', 'Employee ID'], ['area', 'Area'], ['address', 'Address']];
+  m.innerHTML = `<h3>Associates</h3><button class="btn" id="ab">+ Add associate</button><p style="color:#777;margin-top:6px">Only associates marked Active can log in. Click a name to see their full data.</p><div id="list"></div>`;
+  $('ab').onclick = () => {
+    modal(`<h3>New associate</h3>${form(AF)}<button class="btn" id="sv">Create login</button>`);
+    $('sv').onclick = async () => {
+      const v = val(AF);
+      if (!v.fullName || !v.email || v.password.length < 6) return toast('Name, email and a 6+ character password are required');
+      try { await DB.addManagerWithLogin(v); closeModal(); toast('Associate created. Share the email and password with them.'); }
+      catch (e) { toast(e.message); }
+    };
+  };
+  window._v = mgrView;
+  window._t = async (id, s) => { try { await DB.toggleManagerStatus(id, s === 'active' ? 'inactive' : 'active'); } catch (e) { toast(e.message); } };
+  sub(db.collection('managers'), a => {
+    MG = a;
+    $('list').innerHTML = tbl(['Name', 'Emp ID', 'Mobile', 'Email', 'Area', 'Login', ''], a.map(x => [
+      `<a href="#" onclick="_v('${x.id}');return false"><b>${esc(x.fullName)}</b></a>`, esc(x.empId), esc(x.mobile), esc(x.email), esc(x.area), bd(x.status),
+      `<button class="btn s o" onclick="_t('${x.id}','${x.status}')">${x.status === 'active' ? 'Deactivate' : 'Activate'}</button>`]));
+  });
+}
+async function mgrView(id) {
+  const x = MG.find(a => a.id == id);
+  modal('<p>Loading...</p>');
+  try {
+    const [L, V, F, C] = await Promise.all([DB.getLeads(id), DB.getSiteVisits(id), DB.getFollowUps(id), DB.getCustomers(id)]);
+    modal(`<h3>${esc(x.fullName)} ${bd(x.status)}</h3>${x.photo ? `<img class="th" src="${esc(x.photo)}">` : ''}
+      <p>${['empId', 'email', 'mobile', 'area', 'address', 'emergency'].map(k => `<b>${k}:</b> ${esc(x[k] || '—')}`).join('<br>')}<br><b>joined:</b> ${fd(x.createdAt)}</p>
+      <h4>Leads (${L.length})</h4>${tbl(['Name', 'Phone', 'Status'], L.map(l => [esc(l.name), esc(l.phone), bd(l.status)]))}
+      <h4>Site visits (${V.length})</h4>${tbl(['Name', 'Date', 'Status'], V.map(v => [esc(v.name || v.customer), esc(v.date), bd(v.status)]))}
+      <h4>Follow-ups (${F.length})</h4>${tbl(['Client', 'Date', 'Status'], F.map(f => [esc(f.client), esc(f.date), bd(f.status)]))}
+      <h4>Customers (${C.length})</h4>${tbl(['Name', 'Phone', 'Status'], C.map(c => [esc(c.name), esc(c.phone), bd(c.status)]))}
+      <button class="btn o" onclick="closeModal()">Close</button>`);
+  } catch (e) { closeModal(); toast(e.message); }
+}
+
+/* ---------- Projects (with image upload) ---------- */
+function proj(m) {
+  const PF = [['name', 'Project name *'], ['location', 'Location'], ['category', 'Category', 'select', ['residential', 'commercial', 'villa', 'farmhouse']],
+    ['status', 'Status', 'select', ['upcoming', 'ongoing', 'completed']], ['amenities', 'Amenities (comma separated)'], ['desc', 'Description', 'area']];
+  m.innerHTML = `<h3>Projects</h3><button class="btn" id="ab">+ Add project</button><div id="list"></div>`;
+  const edit = (d = {}) => {
+    modal(`<h3>${d.id ? 'Edit' : 'Add'} project</h3>${form(PF, { ...d, amenities: (d.amenities || []).join(', ') })}
+      <label>Project image<input type="file" id="im" accept="image/*"></label>${d.img ? `<img class="th" src="${esc(d.img)}"><br>` : ''}
+      <button class="btn" id="sv">Save</button>`);
+    $('sv').onclick = async () => {
+      const v = val(PF);
+      if (!v.name) return toast('Project name is required');
+      try {
+        v.amenities = v.amenities.split(',').map(s => s.trim()).filter(Boolean);
+        const u = await up('im'); if (u) v.img = u;
+        if (d.id) await DB.updateProject(d.id, v); else await DB.addProject({ img: '', ...v });
+        closeModal(); toast('Project saved');
+      } catch (e) { toast(e.message); }
+    };
+  };
+  $('ab').onclick = () => edit();
+  window._e = id => edit(DATA.find(x => x.id == id));
+  window._d = async id => { if (confirm('Delete this project?')) await DB.deleteProject(id); };
+  sub(db.collection('projects'), a => {
+    DATA = a;
+    $('list').innerHTML = tbl(['Image', 'Name', 'Location', 'Category', 'Status', ''], a.map(d => [d.img ? `<img class="th" src="${esc(d.img)}">` : '—', esc(d.name), esc(d.location), esc(d.category), bd(d.status),
+      `<button class="btn s o" onclick="_e('${d.id}')">Edit</button> <button class="btn s o" onclick="_d('${d.id}')">Delete</button>`]));
+  });
+}
+
+/* ---------- Gallery ---------- */
+function gal(m) {
+  m.innerHTML = `<h3>Gallery</h3><div class="card"><input type="file" id="gi" accept="image/*" multiple><button class="btn" id="gu">Upload images</button></div><div id="list"></div>`;
+  $('gu').onclick = async () => {
+    const fs = [...$('gi').files];
+    if (!fs.length) return toast('Choose one or more images first');
+    try { toast('Uploading...'); for (const f of fs) await DB.addGalleryImage(await uploadToCloudinary(f)); $('gi').value = ''; toast('Uploaded'); }
+    catch (e) { toast(e.message); }
+  };
+  window._d = async id => { if (confirm('Delete this image?')) await DB.deleteGalleryImage(id); };
+  sub(db.collection('gallery'), a => $('list').innerHTML = tbl(['Image', ''], a.map(d => [`<img class="th" src="${esc(d.url)}">`, `<button class="btn s o" onclick="_d('${d.id}')">Delete</button>`])));
+}
+
+/* ---------- Testimonials (real client reviews only) ---------- */
+function tes(m) {
+  crud(m, { col: 'testimonials', title: 'Testimonial', req: 'name', del: true,
+    cols: ['Name', 'Location', 'Text'], row: d => [esc(d.name), esc(d.location), esc((d.text || '').slice(0, 60))],
+    fields: [['name', 'Customer name *'], ['location', 'Location'], ['text', 'What they said', 'area']] });
+}
+
+/* ---------- Website settings ---------- */
+async function settings(m) {
+  const S = (await DB.getSettings()) || {};
+  const SF = [['companyName', 'Company name'], ['phone', 'Phone'], ['email', 'Email'], ['address', 'Address'], ['statYears', 'Years of experience'],
+    ['statCustomers', 'Happy customers'], ['statSold', 'Properties sold'], ['statProjects', 'Projects'], ['amenities', 'Amenities (comma separated)']];
+  m.innerHTML = `<h3>Website settings</h3><div class="card">${form(SF, { ...S, amenities: (S.amenities || []).join(', ') })}<button class="btn" id="sv">Save changes</button></div>`;
+  $('sv').onclick = async () => {
+    const v = val(SF); v.amenities = v.amenities.split(',').map(s => s.trim()).filter(Boolean);
+    try { await DB.saveSettings(v); toast('Saved. Live on the website.'); } catch (e) { toast(e.message); }
+  };
+}
+</script>
+</body>
+</html>
