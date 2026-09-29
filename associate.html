@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVYA Associate Panel</title>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<div id="login"><form class="box" id="lform">
+  <h2>AVYA Associate Login</h2>
+  <p id="lerr" style="color:#B5121B;margin-bottom:8px"></p>
+  <label>Email<input id="lemail" type="email" required></label>
+  <label>Password<input id="lpass" type="password" required></label>
+  <button class="btn" style="width:100%">Login</button>
+  <p style="margin-top:12px"><a href="index.html">Back to website</a></p>
+</form></div>
+<div id="app" class="hide"><nav id="nav"></nav><main id="main"></main></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script src="db.js"></script>
+<script src="portal.js"></script>
+<script>
+let MID, ME;
+const own = c => db.collection(c).where('managerId', '==', MID);
+
+boot('manager', (u, r, m) => {
+  MID = r.managerId; ME = m;
+  mkNav({ Dashboard: dash, 'My Leads': leads, 'Follow-ups': fups, 'Site Visits': visits, Customers: custs, 'My Profile': prof }, 'AVYA Associate');
+});
+
+function dash(m) {
+  const c = {};
+  const r = () => m.innerHTML = `<h3>Welcome, ${esc(ME.fullName)}</h3><div class="cards">${Object.entries(c).map(([k, v]) => `<div class="card"><b>${v}</b>${k}</div>`).join('')}</div>`;
+  [['My leads', 'leads', null], ['Pending follow-ups', 'followUps', a => a.filter(x => x.status === 'pending').length],
+   ['Site visits', 'siteVisits', null], ['Customers', 'customers', null]]
+    .forEach(([l, col, f]) => sub(own(col), a => { c[l] = f ? f(a) : a.length; r(); }));
+}
+
+function leads(m) {
+  crud(m, { col: 'leads', title: 'Lead', q: own('leads'), req: 'name', base: { managerId: MID, source: 'Associate' },
+    cols: ['Name', 'Phone', 'Project', 'Status', 'Follow-up'],
+    row: d => [esc(d.name), esc(d.phone), esc(d.project), bd(d.status), esc(d.followUp || '—')], fields: LF });
+}
+
+function fups(m) {
+  crud(m, { col: 'followUps', title: 'Follow-up', q: own('followUps'), req: 'client', del: true, base: { managerId: MID },
+    cols: ['Client', 'Date', 'Time', 'Purpose', 'Status'],
+    row: d => [esc(d.client), esc(d.date), esc(d.time), esc(d.purpose), bd(d.status)],
+    fields: [['client', 'Client *'], ['project', 'Project'], ['date', 'Date', 'date'], ['time', 'Time', 'time'], ['purpose', 'Purpose'],
+      ['status', 'Status', 'select', ['pending', 'completed']], ['notes', 'Notes', 'area']] });
+}
+
+function visits(m) {
+  crud(m, { col: 'siteVisits', title: 'Site visit', q: own('siteVisits'), add: false,
+    cols: ['Name', 'Phone', 'Project', 'When', 'Status'],
+    row: d => [esc(d.name || d.customer), esc(d.phone), esc(d.project), esc((d.date || '') + ' ' + (d.time || '')), bd(d.status)],
+    fields: [['status', 'Status', 'select', ['scheduled', 'confirmed', 'completed', 'cancelled']], ['remarks', 'Remarks', 'area']] });
+}
+
+function custs(m) {
+  crud(m, { col: 'customers', title: 'Customer', q: own('customers'), req: 'name', base: { managerId: MID },
+    cols: ['Name', 'Phone', 'Project', 'Unit', 'Status'],
+    row: d => [esc(d.name), esc(d.phone), esc(d.project), esc(d.unit), bd(d.status)],
+    fields: [['name', 'Name *'], ['phone', 'Phone', 'tel'], ['email', 'Email', 'email'], ['project', 'Project'], ['unit', 'Plot / unit no.'],
+      ['status', 'Status', 'select', ['interested', 'negotiation', 'booked', 'completed']], ['notes', 'Notes', 'area']] });
+}
+
+function prof(m) {
+  const PF = [['fullName', 'Full name'], ['mobile', 'Mobile', 'tel'], ['area', 'Area'], ['address', 'Address'], ['emergency', 'Emergency contact']];
+  m.innerHTML = `<h3>My Profile</h3><div class="card">
+    ${ME.photo ? `<img class="th" style="width:80px;height:80px;border-radius:50%" src="${esc(ME.photo)}">` : ''}
+    <p style="margin:8px 0"><b>${esc(ME.empId || '')}</b> ${esc(ME.email)} ${bd(ME.status)}</p>
+    ${form(PF, ME)}<label>Profile photo<input type="file" id="ph" accept="image/*"></label>
+    <button class="btn" id="ps">Update profile</button></div>`;
+  $('ps').onclick = async () => {
+    try {
+      const v = val(PF); const p = await up('ph'); if (p) v.photo = p;
+      await DB.updateManager(MID, v); Object.assign(ME, v); toast('Profile updated'); prof(m);
+    } catch (e) { toast(e.message); }
+  };
+}
+</script>
+</body>
+</html>
