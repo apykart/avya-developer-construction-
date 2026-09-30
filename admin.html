@@ -720,11 +720,14 @@ if (CONFIG_MISSING) {
     try {
       const snap = await db.collection('users').doc(user.uid).get();
       const u = snap.exists ? snap.data() : null;
-      if (!u || u.status !== 'active' || !['admin', 'manager'].includes(u.role) || (u.role === 'manager' && !u.managerId)) {
-        showToast('Aapke paas is portal ka access nahi hai.', 'error', 6000);
+      const uStatus = String((u && u.status) || '').trim().toLowerCase();
+const uRole = String((u && u.role) || '').trim().toLowerCase();
+if (!u || uStatus !== 'active' || !['admin', 'manager'].includes(uRole) || (uRole === 'manager' && !u.managerId)) {
+        console.log('LOGIN UID:', user.uid, '| users doc:', snap.exists ? snap.data() : 'NOT FOUND');
+showToast('Access nahi. UID: ' + user.uid + ' | ' + (snap.exists ? 'doc mila par role/status galat: ' + JSON.stringify(snap.data()) : 'users/' + user.uid + ' document nahi mila'), 'error', 20000);
         await auth.signOut(); return;
       }
-      currentUser = u.role; currentManagerId = u.managerId || null; currentUid = user.uid; currentEmail = user.email || '';
+      currentUser = uRole; currentManagerId = u.managerId || null; currentUid = user.uid; currentEmail = user.email || '';
       await startListeners();
       if (currentUser === 'manager') {
         const me = getData('managers', []).find(m => m.id === currentManagerId);
